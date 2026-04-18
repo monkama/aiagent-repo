@@ -109,18 +109,25 @@ Cross-encoder 방식과 유사하게 질의-문서를 맞대어 비교한 뒤 `r
 
 ### 인덱싱 전략
 
-**청킹 구조**
+**PDF 파싱 및 청킹 전략**
 
-2025년·2026년 PDF를 각각 청킹하여 `all_chunks(2025,2026).json`으로 통합 저장했다. 각 청크는 아래 구조를 가진다.
+초기에는 `pdfplumber`로 전체 문서를 파싱하고, Upstage Document Parse가 추출한 표 markdown만 별도로 가져와서 `page + heading` 문자열 매칭으로 기존 pdfplumber 청크에 끼워 넣는 방식을 사용하였다. 하지만 실제 문서에서는 Upstage의 `heading`, `paragraph`, `table` 구분이 일관적이지 않았고, 표 제목이나 각주가 heading/paragraph로 분리되거나 표 내부에 섞이는 경우가 많았다. 이로 인해 표가 잘못된 청크에 붙거나, 필요한 표가 누락되는 문제가 발생하였다.
+
+이를 해결하기 위해 최종 파이프라인에서는 pdfplumber와 Upstage의 역할을 page 단위로 분리하였다. 먼저 `pdfplumber`로 표가 있는 페이지를 감지하고, 표가 없는 페이지는 기존처럼 pdfplumber 기반 텍스트를 사용하여 청킹하였다. 반면 표가 있는 Ⅰ. 의료급여제도 페이지는 pdfplumber 청크에 Upstage 표를 끼워 맞추지 않고, Upstage가 해당 페이지에서 추출한 elements를 직접 사용하여 우리가 정한 청크 기준에 따라 새로 청킹하였다. 이후 pdfplumber 기반 청크와 Upstage 기반 청크를 page 순서대로 병합하였다.
+
+청크 단위는 문서 구조에 맞춰 정의하였다. Ⅰ. 의료급여제도는 대분류를 `parent_subject`, 세부 항목을 `subject`로 두었고, `03 의료급여 본인일부부담금`의 `9 의료급여 2종수급권자 본인부담률` 항목은 `○` 항목 단위로 다시 나누었다. Ⅱ. 자주하는 질문 영역은 Q/A 단위로 청킹하였다. 각 청크는 `source`, `section`, `parent_subject`, `subject`, `text`, `tables`, `page` 구조로 저장하였다.
+
+표 처리 과정에서는 단순히 Upstage의 `category == table`만 신뢰하지 않았다. 실제 PDF에서는 표 제목이 table 첫 row에 섞이거나, 표 header인 `구분`이 paragraph/list로 따로 빠지거나, 일부 셀이 table 밖 paragraph로 분리되는 문제가 있었다. 또한 footer 문구나 페이지 번호가 table row 안에 섞이는 경우도 있었다. 따라서 `category == table`을 기본 표 시작 기준으로 두되, `구분` 또는 `구분 의료급여기관`처럼 짧은 paragraph/list가 table 직전에 나타나는 경우에는 이를 다음 table의 header로 간주하여 table에 붙였다.
+
+표의 끝은 새 청크 시작 신호를 기준으로 판단하였다. 대분류 번호, 세부 항목 번호, `○` 항목, Q/A 경계가 나타나면 이전 표가 끝난 것으로 보았다. `※`로 시작하는 주석이 등장하는 경우에도 앞의 table은 종료된 것으로 처리하고, 이후 내용은 text/note로 분리하였다. 다만 Upstage가 표 내부 값을 paragraph로 떨어뜨리는 경우가 있어, 새 청크나 `※`가 나오기 전의 짧은 값은 table spillover로 간주하여 table에 복원하였다.
+
+일부 표는 Upstage의 markdown/html 결과 모두에서 구조가 크게 깨져 자동 후처리만으로 복원하기 어려웠다. 특히 2025년 `의료급여기관 이용 시 본인부담률 및 부담액` 표와 `추나요법 본인부담률` 표는 병합 셀 구조가 깨지거나 일부 값이 paragraph로 분리되어 잘못된 구조로 저장되었다. 이 두 표는 RAG 평가에서 중요한 표였기 때문에 known broken table로 분류하고, 수동으로 정상 markdown 형태를 정의하여 교체하였다.
+
+**청킹 구조**
 
 ```
 section / parent_subject / subject / text / tables / page / source(연도)
 ```
-
-- 표가 없는 페이지: `pdfplumber` 기반 텍스트 추출
-- 표가 있는 페이지: Upstage Document Parse 결과 활용
-- 반복 노이즈(footer, 페이지 번호 등) 제거
-- 2종 수급권자 본인부담률 등 일부 예외 청크는 `○` 패턴 단위로 별도 청킹
 
 **메타데이터 설정**
 
