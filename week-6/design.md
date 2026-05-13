@@ -900,41 +900,6 @@ Agent는 대신 다음 범위까지만 지원한다.
 
 ---
 
-### 종료 조건
-
-```text
-max_steps = 6
-
-종료 조건:
-
-1. 최종 응답에 필요한 핵심 필드가 확보된 경우
-   - query_summary
-   - response_type
-   - category
-   - urgency
-   - agency_candidates
-   - channels
-   - answer
-
-2. response_type이 public_service_inquiry이고, 관련 공공서비스 후보와 신청 채널을 안내할 수 있는 경우
-
-3. response_type이 issue_resolution이고, 소관 기관 후보와 접수 채널을 안내할 수 있는 경우
-
-4. response_type이 administrative_procedure이고, 처리 기관, 접수 채널, 준비 정보를 안내할 수 있는 경우
-
-5. 지역 정보, 사용자 조건, 증빙 정보 등 필수 정보가 부족해 추가 질문이 필요한 경우
-
-6. urgency가 emergency로 판단되어 즉시 신고 안내를 완료한 경우
-
-7. 소관 기관 후보가 여러 개이고, 추가 정보 없이는 더 좁힐 수 없는 경우
-
-8. 같은 Tool을 같은 입력으로 반복 호출하려는 경우
-
-9. Tool 실패 후 재시도 또는 일반 안내 전환까지 완료한 경우
-```
-
----
-
 ## 6. Tool 명세
 
 # RequestClassifierTool
