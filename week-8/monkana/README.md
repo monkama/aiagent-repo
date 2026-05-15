@@ -8,18 +8,21 @@
 ## 구현한 Observability
 
 - 사용한 방식: JSON log
-- trace 저장 위치: `logs/openai_sdk/<run-id>/run.json`, `logs/openai_sdk/<run-id>/tool_calls/*.json`
-- 기록하는 항목:
+- trace 저장 위치:
+  - `logs/openai_sdk/<run-id>/run.json`
+  - `logs/openai_sdk/<run-id>/summary.md`
+- 대표적으로 기록하는 항목:
   - `user_input`
   - `conversation_turns`
   - `tool_call_sequence`
-  - `tool_arguments`
-  - `tool_result`
-  - `tool_error`
-  - `started_at`, `completed_at`
+  - `tool_calls[].selected_tool`
+  - `tool_calls[].tool_arguments`
+  - `tool_calls[].tool_result`
   - `final_answer`
+  - `started_at`
+  - `completed_at`
 
-추가로 최근 로거 개편에서 `stop_reason`, `total_latency_ms`, `tool latency_ms`를 명시적으로 남기도록 보강하고 있습니다. 아래 예시는 실제로 남겨진 대표 trace를 기준으로 요약했습니다.
+현재 프로젝트의 최신 로거는 `stop_reason`, `total_latency_ms`도 함께 남기도록 확장 중입니다. 이번 README에서는 실제로 Tool 호출 흐름이 분명하게 남아 있는 대표 trace를 기준으로 분석했습니다.
 
 ## Agent 실행 흐름
 
@@ -30,11 +33,10 @@
   - `AgencyRoutingTool`
   - `PublicServiceSearchTool`
   - `RequirementAndDraftTool`
-- 종료 조건:
-  - 최종 답변 생성
-  - 추가 질문 필요 시 질문 생성 후 세션 유지
-  - 같은 Tool/같은 입력 반복 호출 방지
-  - Tool 실패 시 일반 안내 후 종료
+- 종료 규칙:
+  - 추가 질문이 필요하면 같은 세션 안에서 follow-up 질문 생성
+  - 같은 Tool과 같은 입력 반복 호출 방지
+  - Tool 실패 시 fallback 안내 후 종료
   - `max_turns = 6`
 
 ## 정상 케이스 Trace
@@ -47,30 +49,28 @@
 
 대표 trace:
 
-- `logs/openai_sdk/20260515_173805_이사했는데-전입신고는-어디서-어떻게-하나요/run.json`
+- `logs/openai_sdk/20260514_043412_이사했는데-전입신고는-어디서-어떻게-하나요/run.json`
 
 실행 요약:
 
 | Step | Type | Name | 주요 입력 | 결과 |
 |------|------|------|-----------|------|
 | 1 | tool_call | `RequestClassifierTool` | `이사했는데 전입신고는 어디서 어떻게 하나요?` | `administrative_procedure`, `residence`, `needs_region=true`, `region_text=null` |
-| 2 | tool_call | `AgencyRoutingTool` | `category=residence`, `keywords=[전입신고, 이사, 주민등록]`, `region_text=서울특별시 강남구` | `정부24 온라인 신청`, `강남구 관할 행정복지센터 방문` 채널 반환 |
-| 3 | tool_call | `RequirementAndDraftTool` | `category=residence`, `agency_name=서울특별시 강남구청`, `user_input=서울특별시 강남구에서 전입신고하고 싶습니다.` | 준비물, 누락 정보, 안내 문안 초안, 주의사항 반환 |
+| 2 | follow-up | assistant question | `새로 이사한 지역을 알려주세요` | 사용자 답변 `서울시 강남구` 획득 |
+| 3 | tool_call | `AgencyRoutingTool` | `category=residence`, `keywords=[전입신고, 이사, 행정절차, 주민등록]`, `region_text=서울시 강남구` | `정부24 온라인 신청`, `전입지 관할 주민센터 방문` 반환 |
+| 4 | tool_call | `RequirementAndDraftTool` | `agency_name=행정복지센터`, `agency_unit=정부24 또는 전입지 주민센터` | 준비 정보, 누락 정보, 초안, 주의사항 반환 |
 
-최종 답변:
+최종 답변 요약:
 
-```text
-서울시 강남구에서 전입신고를 하시려면 아래 방법 중 하나를 이용하실 수 있습니다:
+- 정부24 온라인 신청 가능
+- 강남구 관할 행정복지센터 방문 가능
+- 준비물로 신분증, 새 주소, 전입일, 세대주 여부 등이 안내됨
 
-- 온라인: 정부24(www.gov.kr)에서 전입신고 신청
-- 오프라인: 강남구 관할 행정복지센터(주민센터) 방문
+이 trace에서 확인한 점:
 
-준비물:
-- 신분증(원본)
-- 전입할 정확한 주소
-- 가족관계증명서(필요시, 가족과 함께 전입하는 경우)
-- 신청서(센터 또는 구청 홈페이지에서 다운로드 가능)
-```
+- 추가 질문이 별도 새 요청이 아니라 같은 `conversation_turns` 안에서 이어졌습니다.
+- 실제 Tool 순서가 `classify -> route -> draft`로 남았습니다.
+- 사용자 지역 응답 이후 불필요한 재분류 없이 다음 Tool로 진행했습니다.
 
 ## 실패 또는 예외 케이스 Trace
 
@@ -89,36 +89,34 @@
 | Step | Type | Name | 주요 입력 | 결과 |
 |------|------|------|-----------|------|
 | 1 | tool_call | `RequestClassifierTool` | `회사에서 퇴직금을 안 줬는데 어디에 신고해야 하나요?` | `issue_resolution`, `labor`, `urgency=high` |
-| 2 | tool_call | `AgencyRoutingTool` | `category=labor`, `keywords=[퇴직금, 신고, 임금체불, 노동청]` | `ROUTING_API_FAILED`, `기관 라우팅 API 호출 중 오류가 발생했습니다: 'list' object has no attribute 'get'` |
+| 2 | tool_call | `AgencyRoutingTool` | `category=labor`, `keywords=[퇴직금, 신고, 임금체불, 노동청]` | `ok=false`, `ROUTING_API_FAILED` |
+| 3 | fallback | assistant answer | Tool 실패 결과 관찰 | 고용노동부/1350/온라인 신고 일반 안내 후 종료 |
 
 실패 처리:
 
-- `AgencyRoutingTool` 에러가 발생한 뒤 같은 입력으로 재시도하지 않았습니다.
-- 오케스트레이터는 일반 안내 fallback으로 전환해 `고용노동부 근로감독관서(노동청)`, `1350`, `온라인 신고`를 안내했습니다.
-- 반복 호출 방지 규칙 때문에 같은 Tool을 다시 호출하는 흐름은 나타나지 않았습니다.
+- `AgencyRoutingTool`이 `ROUTING_API_FAILED`를 반환했습니다.
+- 오케스트레이터는 같은 Tool을 같은 입력으로 재호출하지 않았습니다.
+- 대신 일반 fallback 안내로 전환해 사용자가 바로 다음 행동을 할 수 있게 마무리했습니다.
+
+이 trace에서 확인한 점:
+
+- Tool 에러가 구조화된 형태로 기록됐습니다.
+- Tool 실패 뒤 무한 재시도 없이 종료됐습니다.
+- 실패해도 최종 답변은 비어 있지 않고 대체 안내를 제공합니다.
 
 ## Trace 분석
 
-- 예상한 흐름:
-  - 전입신고: `RequestClassifierTool -> 추가 질문 -> AgencyRoutingTool -> RequirementAndDraftTool -> final`
-  - 퇴직금: `RequestClassifierTool -> AgencyRoutingTool -> final`
-- 실제 흐름:
-  - 전입신고 trace는 첫 턴에서 지역 추가 질문을 만들고, 사용자가 `서울시 강남구`를 답한 뒤 같은 세션에서 `AgencyRoutingTool`과 `RequirementAndDraftTool`이 이어서 호출됐습니다.
-  - 실패 trace는 `RequestClassifierTool`까지는 정상 동작했지만 `AgencyRoutingTool` 파싱 오류로 중단됐고, fallback 일반 안내로 종료됐습니다.
-- 잘 동작한 부분:
-  - tool 이름, 인자, 결과, 에러를 JSON으로 남겨서 어느 단계에서 실패했는지 바로 확인할 수 있었습니다.
-  - follow-up 질문이 별도 새 요청이 아니라 같은 세션 흐름으로 이어졌는지 `conversation_turns`로 재확인할 수 있었습니다.
-  - 실패 시 같은 Tool을 반복 호출하지 않고 종료하는 동작이 로그로 확인됐습니다.
-- 문제 또는 개선할 부분:
-  - 대표 trace 시점에는 `stop_reason`, `step latency`가 별도 필드로 저장되지 않아 README에서 추론/계산해야 했습니다.
-  - `AgencyRoutingTool`은 외부 API 파싱 형식 변화에 민감했고, 실제로 `'list' object has no attribute 'get'` 예외가 발생했습니다.
-  - `AgencyRoutingTool`의 기관명 정규화가 과도하게 세부 하위조직명으로 치우친 사례가 있어 후처리 보정이 더 필요합니다.
+- 설계서에서 예상한 흐름은 `decide -> tool call -> observe -> decide -> final` 이었습니다.
+- 정상 trace에서는 실제로 `RequestClassifierTool -> AgencyRoutingTool -> RequirementAndDraftTool` 순서가 확인됐습니다.
+- 전입신고 케이스는 follow-up 질문이 있어도 세션이 끊기지 않고 이어졌습니다.
+- 실패 trace에서는 `AgencyRoutingTool` 오류가 바로 드러났고, 어떤 Tool에서 막혔는지 로그만 보고 바로 찾을 수 있었습니다.
+- 특히 실패 trace는 외부 API 파싱이 취약점이라는 점을 보여줬고, 이후 라우팅 로직을 다시 손보는 근거가 됐습니다.
 
 ## Metrics
 
 | 항목 | 값 | 설명 |
 |------|----|------|
-| total latency (normal) | 약 `18.6s` | `20260515_173805` trace의 `started_at`~`completed_at` 기준 |
+| total latency (normal) | 약 `13.5s` | `20260514_043412` trace의 `started_at`~`completed_at` 기준 |
 | step count (normal) | `3` | classifier, routing, draft |
 | tool error count (normal) | `0` | 정상 케이스에서는 Tool 에러 없음 |
 | total latency (failure) | 약 `9.1s` | `20260515_164240` trace의 `started_at`~`completed_at` 기준 |
@@ -129,24 +127,22 @@
 
 - 저장하지 않은 정보:
   - `.env`, API key, 개인 token
-  - 주민등록번호, 결제 정보, 상세 주소, 연락처
-- masking한 정보:
-  - 샘플 trace에는 `user_id`, `order_id` 같은 식별자가 없어서 별도 masking 대상은 없었습니다.
-  - 향후 식별자가 생기면 `masked_user_id` 같은 필드로 저장할 계획입니다.
-- trace 공유 시 주의할 점:
-  - 예시 질의는 공개 가능한 샘플 문장만 사용했습니다.
-  - 실제 사용자 입력을 넣는 경우 구체 주소, 계좌, 연락처는 제거하거나 마스킹해야 합니다.
+  - 주민등록번호, 계좌번호, 연락처
+- 공개 가능한 예시 문장만 사용:
+  - 퇴직금 미지급 문의
+  - 전입신고 문의
+- 실제 사용자 입력을 로그로 남길 때는 상세 주소, 연락처, 식별번호를 제거하거나 마스킹해야 합니다.
 
 ## 고도화 평가
 
 | 평가 항목 | 구현 여부 | 결과 |
 |-----------|-----------|------|
 | correctness | 미구현 | 별도 evaluator 없음 |
-| groundedness | 미구현 | tool result와 final answer의 자동 비교 미구현 |
-| tool completeness | 미구현 | 수동 trace 분석만 수행 |
+| groundedness | 부분 구현 | Tool 결과와 final answer를 수동 trace 분석으로 비교 |
+| tool completeness | 부분 구현 | Tool 호출 순서, 인자, 결과, 에러는 남기지만 자동 평가는 없음 |
 
 ## 배운 점
 
-- 최종 답변만 보면 괜찮아 보여도, trace를 보면 특정 Tool 파싱 오류나 잘못된 기관명 정규화 같은 문제가 바로 드러났습니다.
-- follow-up 질문이 있는 Agent는 단순 1턴 로그보다 `conversation_turns`까지 남겨야 실제 동작을 재현할 수 있었습니다.
-- 실패 trace 1개만 있어도, 어떤 Tool이 가장 취약한지와 fallback이 제대로 동작하는지 훨씬 분명하게 확인할 수 있었습니다.
+- 최종 답변만 보면 정상처럼 보여도, trace를 보면 어떤 Tool이 어떤 이유로 실패했는지 훨씬 선명하게 보였습니다.
+- follow-up 질문이 있는 Agent는 `conversation_turns`를 함께 남겨야 실제 사용자 경험을 복원할 수 있었습니다.
+- 실패 trace 1개만 있어도 라우팅 로직의 취약점과 fallback 품질을 동시에 점검할 수 있었습니다.
